@@ -1,7 +1,15 @@
 #include "raylib.h"
+#include "raymath.h"
 
 #include <cmath>
 #include <vector>
+
+// ---------------- Utility ----------------
+template<typename T> T ClampValue(T v, T min, T max) {
+	if (v < min) return min;
+	if (v > max) return max;
+	return v;
+}
 
 // ---------------- Terrain ----------------
 float GetHeight(float x, float z) {
@@ -18,21 +26,19 @@ void DrawTerrain(int size) {
 
 			DrawLine3D({(float)x, y1, (float)z}, {(float)(x + 1), y2, (float)z},
 				 DARKGREEN);
-
 			DrawLine3D({(float)x, y1, (float)z}, {(float)x, y3, (float)(z + 1)},
 				 DARKGREEN);
 		}
 	}
 }
 
-// ---------------- Camera Mode ----------------
+// ---------------- Camera ----------------
 enum CameraModeCustom { FREE = 0, LOCKED };
 
 struct CameraState {
 	Camera3D cam;
-	CameraModeCustom mode = FREE;
+	CameraModeCustom mode = LOCKED;
 
-	// Orbit params
 	float distance = 15.0f;
 	float yaw = 180.0f;
 	float pitch = 20.0f;
@@ -42,19 +48,18 @@ struct CameraState {
 int main() {
 	InitWindow(1280, 800, "HillExplorer");
 	ToggleFullscreen();
-
 	EnableCursor();
 	SetTargetFPS(60);
 
 	const int gridSize = 50;
-	Vector3 target = {0, 0, 0};
 
-	// --- Cameras ---
+	std::vector<Vector3> targets = {{-10, 0, -10}, {10, 0, -10}, {-10, 0, 10}, {10, 0, 10}};
+
 	std::vector<CameraState> cameras(4);
 
+	// Init cameras
 	for (int i = 0; i < 4; i++) {
-		cameras[i].cam.position = {10.0f + i * 2.0f, 10.0f, 10.0f};
-		cameras[i].cam.target = target;
+		cameras[i].cam.target = targets[i];
 		cameras[i].cam.up = {0, 1, 0};
 		cameras[i].cam.fovy = 60.0f;
 		cameras[i].cam.projection = CAMERA_PERSPECTIVE;
@@ -62,10 +67,30 @@ int main() {
 
 	int activeCamera = 0;
 
+	// Render textures
+	RenderTexture2D renderTex[4];
+
+	int screenW = GetScreenWidth();
+	int screenH = GetScreenHeight();
+
+	for (int i = 0; i < 4; i++) {
+		renderTex[i] = LoadRenderTexture(screenW / 2, screenH / 2);
+	}
+
 	while (!WindowShouldClose()) {
-		// --- Screen size (IMPORTANT: update every frame) ---
+		// --- Handle resize ---
 		int w = GetScreenWidth();
 		int h = GetScreenHeight();
+
+		static int prevW = w, prevH = h;
+		if (w != prevW || h != prevH) {
+			for (int i = 0; i < 4; i++) {
+				UnloadRenderTexture(renderTex[i]);
+				renderTex[i] = LoadRenderTexture(w / 2, h / 2);
+			}
+			prevW = w;
+			prevH = h;
+		}
 
 		Rectangle viewports[4] = {
 		  {0, 0, (float)w / 2, (float)h / 2},
@@ -73,10 +98,9 @@ int main() {
 		  {0, (float)h / 2, (float)w / 2, (float)h / 2},
 		  {(float)w / 2, (float)h / 2, (float)w / 2, (float)h / 2}};
 
-		// --- Click to select viewport ---
+		// --- Mouse select viewport ---
 		if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
 			Vector2 m = GetMousePosition();
-
 			for (int i = 0; i < 4; i++) {
 				if (CheckCollisionPointRec(m, viewports[i])) {
 					activeCamera = i;
@@ -87,38 +111,27 @@ int main() {
 		CameraState& camState = cameras[activeCamera];
 		Camera3D& cam = camState.cam;
 
-		// --- Switch mode ---
+		// --- Toggle mode ---
 		if (IsKeyPressed(KEY_TAB)) {
 			camState.mode = (camState.mode == FREE) ? LOCKED : FREE;
-
-			if (camState.mode == LOCKED) {
-				// Reset behind target
-				camState.yaw = 180.0f;
-				camState.pitch = 20.0f;
-				camState.distance = 15.0f;
-			}
 		}
 
-		// ---------------- UPDATE CAMERA ----------------
-
+		// --- Update active camera ---
 		if (camState.mode == FREE) {
 			UpdateCamera(&cam, CAMERA_FIRST_PERSON);
-		} else if (camState.mode == LOCKED) {
-			// Rotate
+		} else {
 			if (IsMouseButtonDown(MOUSE_RIGHT_BUTTON)) {
 				Vector2 delta = GetMouseDelta();
-
 				camState.yaw -= delta.x * 0.3f;
 				camState.pitch -= delta.y * 0.3f;
-
-				if (camState.pitch > 89.0f) camState.pitch = 89.0f;
-				if (camState.pitch < -89.0f) camState.pitch = -89.0f;
 			}
 
-			// Zoom
+			camState.pitch = ClampValue(camState.pitch, -89.0f, 89.0f);
+
 			camState.distance -= GetMouseWheelMove() * 2.0f;
-			if (camState.distance < 3.0f) camState.distance = 3.0f;
-			if (camState.distance > 50.0f) camState.distance = 50.0f;
+			camState.distance = ClampValue(camState.distance, 3.0f, 50.0f);
+
+			Vector3 target = targets[activeCamera];
 
 			float yawRad = DEG2RAD * camState.yaw;
 			float pitchRad = DEG2RAD * camState.pitch;
@@ -132,35 +145,44 @@ int main() {
 			cam.target = target;
 		}
 
-		// ---------------- DRAW ----------------
+		// -------- Render each camera to texture --------
+		for (int i = 0; i < 4; i++) {
+			BeginTextureMode(renderTex[i]);
+			ClearBackground(BLACK);
+
+			BeginMode3D(cameras[i].cam);
+
+			DrawTerrain(gridSize);
+			for (int j = 0; j < 4; j++)
+				DrawSphere(targets[j], 0.5f, RED);
+
+			EndMode3D();
+			EndTextureMode();
+		}
+
+		// -------- Draw to screen --------
 		BeginDrawing();
 		ClearBackground(BLACK);
 
 		for (int i = 0; i < 4; i++) {
 			Rectangle vp = viewports[i];
 
-			BeginScissorMode((int)vp.x, (int)vp.y, (int)vp.width, (int)vp.height);
-
-			BeginMode3D(cameras[i].cam);
-
-			DrawTerrain(gridSize);
-			DrawSphere(target, 0.4f, RED);
-
-			EndMode3D();
-			EndScissorMode();
+			DrawTexturePro(renderTex[i].texture,
+				     {0, 0, (float)renderTex[i].texture.width,
+				      -(float)renderTex[i].texture.height},
+				     vp, {0, 0}, 0.0f, WHITE);
 
 			DrawRectangleLinesEx(vp, 2, (i == activeCamera) ? YELLOW : DARKGRAY);
 		}
 
-		// UI
-		DrawText("Click viewport to select | TAB: Switch Mode", 20, 20, 20, WHITE);
-
-		const char* modeText =
-		  (cameras[activeCamera].mode == FREE) ? "FREE MODE" : "LOCKED MODE";
-		DrawText(TextFormat("Active Camera: %d (%s)", activeCamera, modeText), 20, 50,
-		         20, YELLOW);
+		DrawText("Click viewport | TAB switch mode | RMB rotate | Scroll zoom", 20, 20,
+		         20, WHITE);
 
 		EndDrawing();
+	}
+
+	for (int i = 0; i < 4; i++) {
+		UnloadRenderTexture(renderTex[i]);
 	}
 
 	CloseWindow();
